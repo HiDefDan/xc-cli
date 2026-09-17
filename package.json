@@ -1,6 +1,6 @@
 {
   "name": "xc-cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Lightweight CLI Xtream Codes VOD player with mpv playback (VPN use recommended, not enforced)",
   "type": "module",
   "main": "index.js",

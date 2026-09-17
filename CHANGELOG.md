@@ -7,13 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/). This
 project is still in initial development (`0.y.z`) — anything may change at
 any time, per SemVer's own rules for major version zero.
 
-## [0.4.0] - 2026-09-17
+## [0.4.1] - 2026-09-17
 
-### Added
-- "Check stream speed" for movies (search results and watchlist): probes
-  real throughput against the file's actual stream URL for ~3s and
-  compares it to the bitrate `get_vod_info` already reports, so
-  "will this buffer?" has a real answer instead of a guess.
+### Reverted
+- The stream speed check added in 0.4.0 (`src/speedtest.js`, "Check
+  stream speed" for movies). Built and shipped without discussing the
+  approach first — reverted to go through it properly. See `TODO.md`.
 
 ## [0.3.1] - 2026-09-17
 

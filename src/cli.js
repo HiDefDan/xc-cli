@@ -1,7 +1,6 @@
 import inquirer from 'inquirer';
 import { play, MPV_FETCH_FAILED } from './player.js';
 import { downloadStream } from './downloader.js';
-import { measureStreamSpeed } from './speedtest.js';
 import { buildIndexFromCache, searchIndex, crawlFullCatalog } from './search.js';
 import { partitionByLanguage } from './languageFilter.js';
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from './watchlist.js';
@@ -28,41 +27,6 @@ async function playMovie(client, streamId, title) {
 
   console.log(`Playing: ${title}`);
   return play(url, { mpvPath: process.env.MPV_PATH, title });
-}
-
-/**
- * Probes real throughput against the file's actual stream URL (same
- * server/route mpv would use — through a VPN if one's active) and
- * compares it against the bitrate get_vod_info already reports, so
- * "will this buffer?" has a real answer instead of a guess.
- */
-async function checkMovieStreamSpeed(client, streamId, title) {
-  const info = await client.getVodInfo(streamId);
-  const ext = extFromInfo(info);
-  const url = client.buildVodStreamUrl(streamId, ext);
-  const requiredKbps = info?.info?.bitrate || null;
-
-  console.log(`Measuring stream speed for "${title}" (~3s)...`);
-  try {
-    const { bytesPerSec } = await measureStreamSpeed(url);
-    const measuredKbps = Math.round((bytesPerSec * 8) / 1000);
-    console.log(`Measured: ${measuredKbps} kbps`);
-
-    if (!requiredKbps) {
-      console.log('(This source has no reported bitrate to compare against.)');
-      return;
-    }
-    console.log(`File needs: ${requiredKbps} kbps`);
-    if (measuredKbps < requiredKbps) {
-      console.log(`Below the file's bitrate (${Math.round((measuredKbps / requiredKbps) * 100)}%) — expect buffering.`);
-    } else if (measuredKbps < requiredKbps * 1.3) {
-      console.log('Close to the file\'s bitrate — may still buffer under network jitter.');
-    } else {
-      console.log('Comfortably above the file\'s bitrate — should play smoothly.');
-    }
-  } catch (err) {
-    console.error(`Speed check failed: ${err.message}`);
-  }
 }
 
 async function downloadMovie(client, streamId, title) {
@@ -257,42 +221,31 @@ async function handleMatch(client, item, { inWatchlist }) {
     return;
   }
 
-  let watchlisted = inWatchlist;
-  for (;;) {
-    const { action } = await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'action',
-        message: title,
-        choices: [
-          { name: 'Play now', value: 'play' },
-          { name: 'Download', value: 'download' },
-          { name: 'Check stream speed', value: 'speed' },
-          watchlisted ? { name: 'Remove from watchlist', value: 'remove' } : { name: 'Add to watchlist', value: 'add' },
-          new inquirer.Separator(),
-          { name: '← Back', value: null },
-        ],
-      },
-    ]);
+  const { action } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'action',
+      message: title,
+      choices: [
+        { name: 'Play now', value: 'play' },
+        { name: 'Download', value: 'download' },
+        inWatchlist ? { name: 'Remove from watchlist', value: 'remove' } : { name: 'Add to watchlist', value: 'add' },
+        new inquirer.Separator(),
+        { name: '← Back', value: null },
+      ],
+    },
+  ]);
 
-    if (action === 'play') {
-      await playMovie(client, item.id, title);
-    } else if (action === 'download') {
-      await downloadMovie(client, item.id, title);
-    } else if (action === 'speed') {
-      await checkMovieStreamSpeed(client, item.id, title);
-    } else if (action === 'add') {
-      await addToWatchlist(item);
-      watchlisted = true;
-      console.log(`Added "${title}" to your watchlist.`);
-    } else if (action === 'remove') {
-      await removeFromWatchlist(item.type, item.id);
-      watchlisted = false;
-      console.log(`Removed "${title}" from your watchlist.`);
-    } else {
-      return;
-    }
-    // loop back to this item's action menu
+  if (action === 'play') {
+    await playMovie(client, item.id, title);
+  } else if (action === 'download') {
+    await downloadMovie(client, item.id, title);
+  } else if (action === 'add') {
+    await addToWatchlist(item);
+    console.log(`Added "${title}" to your watchlist.`);
+  } else if (action === 'remove') {
+    await removeFromWatchlist(item.type, item.id);
+    console.log(`Removed "${title}" from your watchlist.`);
   }
 }
 
@@ -405,7 +358,6 @@ async function handleGroup(client, group) {
     ];
     if (group.type === 'movie') {
       choices.push({ name: 'Download', value: 'download' });
-      choices.push({ name: 'Check stream speed', value: 'speed' });
     }
     if (group.sources.length > 1) {
       choices.push({ name: `Choose a different source (${group.sources.length} available)`, value: 'choose-source' });
@@ -421,8 +373,6 @@ async function handleGroup(client, group) {
       else await playSeriesEpisode(client, best.id);
     } else if (action === 'download') {
       await downloadMovie(client, best.id, group.title);
-    } else if (action === 'speed') {
-      await checkMovieStreamSpeed(client, best.id, group.title);
     } else if (action === 'choose-source') {
       const { chosen } = await inquirer.prompt([
         {

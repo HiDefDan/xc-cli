@@ -15,6 +15,10 @@ commitments, just things worth not forgetting.
 
 ## Playback
 
+- **Stream speed vs. required bitrate** — needs an actual discussion, not
+  another unilateral build (see 0.4.0/0.4.1 in CHANGELOG). User has a NUC
+  playback log from a real stalling session that may show what's actually
+  going on before we design anything.
 - Mark items watched/played on TMDB — TMDB's watch-history/rating
   endpoints need real account auth (session id via v4), not just the
   read-only API key we use today.
