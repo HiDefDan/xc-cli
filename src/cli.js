@@ -1,7 +1,6 @@
 import inquirer from 'inquirer';
 import { play, MPV_FETCH_FAILED } from './player.js';
 import { downloadStream } from './downloader.js';
-import { verifyVpnActive } from './vpnCheck.js';
 import { buildIndexFromCache, searchIndex, crawlFullCatalog } from './search.js';
 import { partitionByLanguage } from './languageFilter.js';
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from './watchlist.js';
@@ -20,45 +19,17 @@ function extFromInfo(info, fallback = 'mp4') {
   return info?.movie_data?.container_extension || info?.info?.container_extension || fallback;
 }
 
-/**
- * Re-verified before every round trip to the Xtream server, not just at
- * startup — the tunnel can drop mid-session. Nags with a retry prompt
- * instead of silently proceeding over a leaked connection.
- */
-async function requireVpn() {
-  for (;;) {
-    const result = await verifyVpnActive();
-    if (result.ok) return true;
-
-    console.error('\nVPN check failed — refusing to contact the Xtream server.');
-    if (result.reason === 'no-tunnel-interface') {
-      console.error('No tunnel interface (utun/tun/ppp) is the default route — VPN is not active.');
-    } else if (result.reason === 'same-as-baseline') {
-      console.error(`Current public IP (${result.current.ip}) matches your non-VPN baseline. Tunnel is down.`);
-    } else if (result.reason === 'lookup-failed') {
-      console.error(`Could not determine current public IP: ${result.error}`);
-    }
-    const { retry } = await inquirer.prompt([
-      { type: 'confirm', name: 'retry', message: 'Fix your VPN, then retry?', default: true },
-    ]);
-    if (!retry) return false;
-  }
-}
-
-/** Returns mpv's exit code (or null if a VPN check aborted before mpv even ran), so callers can tell a fetch failure apart from a normal quit. */
+/** Returns mpv's exit code, so callers can tell a fetch failure apart from a normal quit. */
 async function playMovie(client, streamId, title) {
-  if (!(await requireVpn())) return null;
   const info = await client.getVodInfo(streamId);
   const ext = extFromInfo(info);
   const url = client.buildVodStreamUrl(streamId, ext);
 
-  if (!(await requireVpn())) return null;
   console.log(`Playing: ${title}`);
   return play(url, { mpvPath: process.env.MPV_PATH, title });
 }
 
 async function downloadMovie(client, streamId, title) {
-  if (!(await requireVpn())) return;
   const info = await client.getVodInfo(streamId);
   const ext = extFromInfo(info);
   const url = client.buildVodStreamUrl(streamId, ext);
@@ -72,7 +43,6 @@ async function downloadMovie(client, streamId, title) {
 }
 
 async function downloadEpisode(client, showTitle, season, episode) {
-  if (!(await requireVpn())) return;
   const ext = episode.container_extension || 'mp4';
   const url = client.buildSeriesStreamUrl(episode.id, ext);
   const episodeTitle = cleanEpisodeTitle(episode.title);
@@ -134,7 +104,6 @@ async function playMovieWithFallback(client, sources, startIndex = 0) {
   for (let i = startIndex; i < sources.length; i++) {
     const source = sources[i];
     const code = await playMovie(client, source.id, source.name);
-    if (code === null) return; // VPN check aborted — not a source problem, retrying won't help
     if (code !== MPV_FETCH_FAILED) return;
     const next = sources[i + 1];
     if (next) console.log(`"${source.name}" failed to fetch — trying next source (${next.name})...`);
@@ -156,7 +125,6 @@ async function playMovieWithFallback(client, sources, startIndex = 0) {
  * open is cheap, and staying current matters (newly-added episodes).
  */
 async function playSeriesEpisode(client, seriesId, { getExtraChoices, onExtra, forceRefresh = false } = {}) {
-  if (!(await requireVpn())) return;
   if (forceRefresh) console.log('Checking for new episodes...');
   const info = await client.getSeriesInfo(seriesId, { force: forceRefresh });
   const showTitle = cleanTitle(info.info.name);
@@ -214,7 +182,6 @@ async function playSeriesEpisode(client, seriesId, { getExtraChoices, onExtra, f
       const url = client.buildSeriesStreamUrl(episode.id, ext);
       const episodeTitle = cleanEpisodeTitle(episode.title);
 
-      if (!(await requireVpn())) continue;
       console.log(`Playing: ${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}`);
       await play(url, { mpvPath: process.env.MPV_PATH, title: `${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}` });
       // loop back to the same season's episode list so the next episode is one step away
@@ -466,7 +433,6 @@ const SEARCH_ENRICH_CAP = 25; // cap how many groups get TMDB/bitrate enrichment
  * settled search does.
  */
 async function searchTitles(client, typeFilter = null) {
-  if (!(await requireVpn())) return; // category names may need a live fetch if never browsed
   let index = await buildIndexFromCache(client);
   if (typeFilter) index = index.filter((item) => item.type === typeFilter);
 
@@ -590,7 +556,6 @@ async function runFullCrawl(client, { confirmMessage }) {
     { type: 'confirm', name: 'confirmed', default: false, message: confirmMessage },
   ]);
   if (!confirmed) return false;
-  if (!(await requireVpn())) return false;
 
   const total = await crawlFullCatalog(client, (done, total) => {
     if (done % 20 === 0 || done === total) console.log(`  ${done}/${total} categories indexed...`);
