@@ -8,7 +8,13 @@ export const MPV_FETCH_FAILED = 2;
 export function play(streamUrl, { mpvPath = 'mpv', title } = {}) {
   return new Promise((resolve, reject) => {
     const windowMode = process.env.MPV_WINDOW_MODE || 'fit'; // 'fit' | 'fullscreen' | 'native'
-    const args = ['--force-window=yes'];
+    // Without this, mpv starts playback immediately and only shows its
+    // "buffering" state after the stream underruns a moment later — a
+    // jarring "playing then suddenly frozen" sequence that's easy to
+    // mistake for a crash, especially fullscreen with no window chrome
+    // visible for reassurance. This makes it buffer up front instead, so
+    // the first thing you see is one continuous, expected buffering state.
+    const args = ['--force-window=yes', '--cache-pause-initial=yes'];
     if (windowMode === 'fullscreen') {
       args.push('--fs=yes');
     } else if (windowMode === 'fit') {
