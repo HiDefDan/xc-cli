@@ -1,35 +1,30 @@
 # xc-cli
 
-A lightweight CLI-based IPTV VOD player built with Node.js. No OS-specific
-code — needs Node and mpv installed, nothing more.
+A lightweight CLI-based IPTV VOD player for Xtream Codes, built with Node.js.
+No OS-specific code — needs Node and mpv installed, nothing more.
 
-## Vision
+## Features
 
-Build a smart Xtream Codes VOD client that:
-
-1. **Filters content by preference** — Cross-references your Trakt/TVTime watch lists against available Xtream VOD groups (avoid browsing 8000+ titles)
-2. **Cleans up messy titles** — Parse out junk (4K, AMAZON, 2024, pipes) to get clean hierarchy: Title → Season → Episode
-3. **Smart audio selection** — Detect original language from title country code, auto-select compatible audio tracks, filter out problematic EAC3 codec
-4. **VPN recommended, not enforced** — Xtream credentials are usually tied to one IP; running behind a VPN is on you, this app doesn't manage or verify one
-5. **Native playback** — Stream to mpv with proper audio track selection
-6. **Local caching** — SQLite cache of VOD hierarchy, Trakt mappings, playback state
-
-## Architecture
-
-**Core Logic (Node.js, reusable):**
-- Xtream API client
-- Title parser (extract season/episode/language from messy names)
-- Audio codec detection (filter incompatible tracks)
-- Trakt/TVTime fetcher
-- TMDB metadata enrichment
-- SQLite cache layer
-
-**UI Layer:**
-- Interactive CLI menus (inquirer)
-- Terminal display (blessed)
-- mpv integration (spawn with audio track selection)
-
-**Platform-agnostic design** — Core logic can be ported to Fire TV/Android later if needed.
+- **Live search** — debounced, autocomplete-as-you-type across the whole
+  catalog, or scoped to just Movies or Series
+- **Deduplicated results** — the same title from multiple provider sources
+  is collapsed into one entry, ranked by real signals: TMDB
+  episode-completeness for series, bitrate for movies
+- **TMDB metadata** — the only third-party metadata source. Used for series
+  episode-completeness ranking and for merging duplicate sources (movies
+  and series) whose catalog titles differ slightly across providers
+- **Clean titles** — provider junk (language/quality prefixes, repeated
+  show name + season/episode code in episode titles) stripped for display
+- **Language filtering** — non-English content is deprioritized, not
+  hidden, both by title prefix and by category name
+- **Local watchlist** — add/remove movies and series, browsable separately
+- **Download or play** — stream straight to mpv, or save to disk
+  (`DOWNLOAD_DIR`) with progress and cleanup on failure
+- **Keyboard navigation** — Escape or Left = Back, Right = Select, in
+  addition to Enter, throughout every menu
+- **VPN recommended, not enforced** — Xtream credentials are usually tied
+  to one IP; running behind a VPN is entirely up to you, this app doesn't
+  manage or verify one
 
 ## Quick Start
 
@@ -39,59 +34,52 @@ npm install
 
 # Create .env with credentials
 cp .env.example .env
-# Edit: XTREAM_SERVER, XTREAM_USER, XTREAM_PASS
+# Edit: XTREAM_SERVER, XTREAM_USER, XTREAM_PASS, TMDB_API_KEY
 
 # Run
 npm start
 ```
 
-`.env` is gitignored — never commit it. A VPN is recommended but entirely up to you
-to set up and run outside this app.
+`.env` is gitignored — never commit it.
 
-## Status
+## Configuration
 
-**Phase 1 (MVP) — done:** Xtream auth, VOD category/movie browsing, series → season →
-episode browsing, mpv playback.
+All via `.env` (see `.env.example`):
 
-**Not yet built:** Trakt/TVTime cross-referencing, title cleanup parser, audio codec
-detection/auto-select, SQLite caching.
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `XTREAM_SERVER`, `XTREAM_USER`, `XTREAM_PASS` | yes | — | Xtream Codes account |
+| `TMDB_API_KEY` | yes, for ranking/dedup | — | v3 API key or v4 read-access token |
+| `MPV_PATH` | no | `mpv` | mpv binary to spawn |
+| `MPV_WINDOW_MODE` | no | `fit` | `fit` / `fullscreen` / `native` |
+| `DOWNLOAD_DIR` | no | `~/Downloads/xc-cli` | Where "Download" saves files |
+| `TMDB_API_BASE` | no | `https://api.themoviedb.org/3` | Override for testing |
+| `XTREAM_MIN_REQUEST_INTERVAL_MS` | no | `750` | Self-imposed throttle between Xtream API calls |
 
-## Workflow
+## Architecture
 
-1. Connects to Xtream server
-2. Fetches VOD categories
-3. User selects category
-4. CLI shows hierarchical menu: Show → Season → Episode
-5. User selects episode + audio track
-6. mpv opens stream with correct audio track
+Plain Node.js modules under `src/`, no framework:
 
-## Technical Stack
+- `xtream.js` — Xtream Codes API client, self-throttled
+- `cache.js` — cache-aside JSON file store (`data/cache.json`), not a
+  database — SQLite was tried and dropped after repeated native-binding
+  crashes
+- `search.js`, `titleClean.js`, `languageFilter.js`, `categoryFilter.js` —
+  catalog indexing, title cleanup, and language/category filtering
+- `tmdb.js` — the only metadata provider
+- `watchlist.js`, `searchState.js` — local JSON-backed persistence
+- `player.js`, `downloader.js` — spawn mpv, or stream a file to disk
+- `cli.js` — all menu/navigation logic (inquirer + a custom
+  `inquirer-autocomplete-prompt` for live search)
 
-- **Language:** Node.js (ES modules)
-- **APIs:** Xtream Codes, Trakt, TMDB
-- **Storage:** SQLite3
-- **Video:** mpv (spawned via child_process)
-- **CLI:** inquirer, blessed
-- **Networking:** axios, dotenv
+## Explicitly not supported
 
-## Features
-
-- ✓ VPN recommended (not enforced or managed by the app)
-- ✓ Trakt/TVTime list cross-reference
-- ✓ Title parsing (remove metadata junk)
-- ✓ Audio codec detection (EAC3 filtering)
-- ✓ Language auto-select (country code → audio track)
-- ✓ Interactive hierarchical browsing
-- ✓ mpv integration
-- ✓ Local caching
-- ✗ Fire TV sideload (optional future)
-- ✗ Playback state sync (future)
-
-## Known Issues
-
-- EAC3 audio streams may not play on all devices (filter/warn)
-- Some Xtream servers geo-restrict content by VPN exit IP
-- Trakt/TVTime API rate limits on large lists
+- **Trakt / TVTime** — TVTime is dead and Trakt requires a paid plan for
+  API access this app would need; not something this project depends on
+- **EAC3 / audio codec filtering** — floated early on as a possible issue
+  on Fire TV-class hardware, never confirmed either way, and not
+  implemented. Not a real feature or a concrete plan.
+- **SQLite** — abandoned as a technical approach; see `cache.js` above
 
 ## Author
 
