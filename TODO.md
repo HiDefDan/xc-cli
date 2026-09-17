@@ -13,6 +13,15 @@ commitments, just things worth not forgetting.
 - A settings menu in general (came up re: `DOWNLOAD_DIR`) — one place to
   see/change the above instead of only via `.env`.
 
+## Playback
+
+- Mark items watched/played on TMDB — TMDB's watch-history/rating
+  endpoints need real account auth (session id via v4), not just the
+  read-only API key we use today.
+- Detect hardware and tailor the mpv launch to it (e.g. `--hwdec`
+  choice) instead of one fixed set of flags for every machine — relevant
+  now that this runs on more than one kind of box (Mac, Omarchy NUC).
+
 ## Bigger/riskier ideas (see conversation for context, not decided)
 
 - Optional GUI: additive, not a rewrite — a local web server reusing the
