@@ -1,6 +1,6 @@
 {
   "name": "xc-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lightweight CLI Xtream Codes VOD player for macOS with WireGuard isolation and mpv playback",
   "type": "module",
   "main": "index.js",

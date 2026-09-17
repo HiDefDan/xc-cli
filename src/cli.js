@@ -1,12 +1,13 @@
 import inquirer from 'inquirer';
 import { play, MPV_FETCH_FAILED } from './player.js';
+import { downloadStream } from './downloader.js';
 import { verifyVpnActive } from './vpnCheck.js';
 import { buildIndexFromCache, searchIndex, crawlFullCatalog } from './search.js';
 import { partitionByLanguage } from './languageFilter.js';
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from './watchlist.js';
 import { getLastSearchTerm, setLastSearchTerm } from './searchState.js';
 import { cleanTitle, cleanEpisodeTitle } from './titleClean.js';
-import { lookupShow, completeness } from './tvmaze.js';
+import { lookupShow, completeness, lookupMovie } from './tmdb.js';
 import BackableListPrompt from './backableListPrompt.js';
 import BackableAutocompletePrompt from './backableAutocompletePrompt.js';
 
@@ -54,6 +55,74 @@ async function playMovie(client, streamId, title) {
   if (!(await requireVpn())) return null;
   console.log(`Playing: ${title}`);
   return play(url, { mpvPath: process.env.MPV_PATH, title });
+}
+
+async function downloadMovie(client, streamId, title) {
+  if (!(await requireVpn())) return;
+  const info = await client.getVodInfo(streamId);
+  const ext = extFromInfo(info);
+  const url = client.buildVodStreamUrl(streamId, ext);
+
+  console.log(`Downloading: ${title}`);
+  try {
+    await downloadStream(url, `${title}.${ext}`);
+  } catch (err) {
+    console.error(`Download failed: ${err.message}`);
+  }
+}
+
+async function downloadEpisode(client, showTitle, season, episode) {
+  if (!(await requireVpn())) return;
+  const ext = episode.container_extension || 'mp4';
+  const url = client.buildSeriesStreamUrl(episode.id, ext);
+  const episodeTitle = cleanEpisodeTitle(episode.title);
+  const seasonNum = String(season).padStart(2, '0');
+  const episodeNum = String(episode.episode_num).padStart(2, '0');
+  const filename = `${showTitle} - S${seasonNum}E${episodeNum} - ${episodeTitle}.${ext}`;
+
+  console.log(`Downloading: ${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}`);
+  try {
+    await downloadStream(url, filename);
+  } catch (err) {
+    console.error(`Download failed: ${err.message}`);
+  }
+}
+
+/** Lets the user pick a season, then an episode, to download — separate from the play loop above so "Play now" stays a single, fast keystroke. */
+async function downloadEpisodeFlow(client, info, showTitle, seasons) {
+  const { season } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'season',
+      message: `${showTitle} — download from which season?`,
+      choices: [
+        ...seasons.map((s) => ({ name: `Season ${s}`, value: s })),
+        new inquirer.Separator(),
+        { name: '← Back', value: null },
+      ],
+    },
+  ]);
+  if (!season) return;
+
+  const episodes = info.episodes[season];
+  for (;;) {
+    const { episode } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'episode',
+        message: `Download — Season ${season}`,
+        pageSize: 20,
+        choices: [
+          ...episodes.map((e) => ({ name: `E${e.episode_num} — ${cleanEpisodeTitle(e.title)}`, value: e })),
+          new inquirer.Separator(),
+          { name: '← Back', value: null },
+        ],
+      },
+    ]);
+    if (!episode) return;
+    await downloadEpisode(client, showTitle, season, episode);
+    // loop back so grabbing several episodes from the same season is quick
+  }
 }
 
 /**
@@ -106,13 +175,19 @@ async function playSeriesEpisode(client, seriesId, { getExtraChoices, onExtra, f
         message: `${showTitle} — Season`,
         choices: [
           ...seasons.map((s) => ({ name: `Season ${s}`, value: s })),
-          ...(extra.length ? [new inquirer.Separator(), ...extra] : []),
+          new inquirer.Separator(),
+          { name: '⬇ Download an episode...', value: '__extra:download-episode' },
+          ...extra,
           new inquirer.Separator(),
           { name: '← Back', value: null },
         ],
       },
     ]);
     if (!season) return;
+    if (season === '__extra:download-episode') {
+      await downloadEpisodeFlow(client, info, showTitle, seasons);
+      continue;
+    }
     if (season.startsWith('__extra:')) {
       await onExtra(season);
       continue; // re-render the season prompt so a toggled label is reflected
@@ -186,6 +261,7 @@ async function handleMatch(client, item, { inWatchlist }) {
       message: title,
       choices: [
         { name: 'Play now', value: 'play' },
+        { name: 'Download', value: 'download' },
         inWatchlist ? { name: 'Remove from watchlist', value: 'remove' } : { name: 'Add to watchlist', value: 'add' },
         new inquirer.Separator(),
         { name: '← Back', value: null },
@@ -195,6 +271,8 @@ async function handleMatch(client, item, { inWatchlist }) {
 
   if (action === 'play') {
     await playMovie(client, item.id, title);
+  } else if (action === 'download') {
+    await downloadMovie(client, item.id, title);
   } else if (action === 'add') {
     await addToWatchlist(item);
     console.log(`Added "${title}" to your watchlist.`);
@@ -209,21 +287,19 @@ async function handleMatch(client, item, { inWatchlist }) {
  * category/language source, same underlying movie or show) into one
  * group per title, and ranks each group's sources so the default pick
  * isn't just an arbitrary catalog row:
- *  - series: actual-vs-canonical episode count from TVmaze (one lookup
+ *  - series: actual-vs-canonical episode count from TMDB (one lookup
  *    per group, not per source)
- *  - movies: bitrate from get_vod_info — TVmaze has no movie data, and
- *    resolution/codec aren't reliably exposed, but bitrate is, and for
- *    same-runtime duplicates (confirmed via duration) it's a real,
- *    comparable quality signal (seen 2180–5296 kbps across duplicates
- *    of an identical-length file)
+ *  - movies: bitrate from get_vod_info — resolution/codec aren't
+ *    reliably exposed, but bitrate is, and for same-runtime duplicates
+ *    (confirmed via duration) it's a real, comparable quality signal
+ *    (seen 2180–5296 kbps across duplicates of an identical-length file)
  *
  * The first pass groups by cleaned catalog title, which only catches
- * sources whose title string is identical after cleaning. A second pass,
- * series only, then merges any groups whose TVmaze lookup resolved to the
- * same show id — TVmaze's fuzzy singlesearch often resolves near-miss
- * spelling/punctuation variants across providers to one canonical show,
- * catching duplicates the first pass's exact-string match misses. No
- * movie equivalent: TVmaze has no movie data.
+ * sources whose title string is identical after cleaning. A second pass
+ * then merges any groups whose TMDB lookup resolved to the same
+ * movie/show id — TMDB's search often resolves near-miss
+ * spelling/punctuation variants across providers to one canonical title,
+ * catching duplicates the first pass's exact-string match misses.
  */
 async function buildResultGroups(client, items) {
   const byKey = new Map();
@@ -237,40 +313,52 @@ async function buildResultGroups(client, items) {
   const groups = [...byKey.values()];
   for (const group of groups) {
     if (group.type === 'series') {
-      const tvmazeData = await lookupShow(group.title).catch(() => null);
-      group.tvmazeId = tvmazeData?.id ?? null;
+      const tmdbData = await lookupShow(group.title).catch(() => null);
+      group.metaId = tmdbData?.id ?? null;
       for (const source of group.sources) {
-        if (!tvmazeData) {
+        if (!tmdbData) {
           source.completeness = null;
           continue;
         }
         const info = await client.getSeriesInfo(source.id).catch(() => null);
-        source.completeness = info ? completeness(info.episodes, tvmazeData) : null;
+        source.completeness = info ? completeness(info.episodes, tmdbData) : null;
       }
-      group.sources.sort((a, b) => (b.completeness?.ratio ?? -1) - (a.completeness?.ratio ?? -1));
-    } else if (group.sources.length > 1) {
-      // only worth the extra calls when there's actually something to rank
-      for (const source of group.sources) {
-        const info = await client.getVodInfo(source.id).catch(() => null);
-        source.bitrate = info?.info?.bitrate || null;
-      }
-      group.sources.sort((a, b) => (b.bitrate ?? -1) - (a.bitrate ?? -1));
+    } else {
+      const tmdbData = await lookupMovie(group.title).catch(() => null);
+      group.metaId = tmdbData?.id ?? null;
     }
   }
 
   const merged = [];
-  const byTvmazeId = new Map();
+  const byMetaId = new Map();
   for (const group of groups) {
-    if (group.type === 'series' && group.tvmazeId) {
-      const existing = byTvmazeId.get(group.tvmazeId);
+    if (group.metaId) {
+      const mapKey = `${group.type}:${group.metaId}`;
+      const existing = byMetaId.get(mapKey);
       if (existing) {
         existing.sources.push(...group.sources);
-        existing.sources.sort((a, b) => (b.completeness?.ratio ?? -1) - (a.completeness?.ratio ?? -1));
-        continue; // folded into an earlier group with the same TVmaze id
+        continue; // folded into an earlier group with the same TMDB id
       }
-      byTvmazeId.set(group.tvmazeId, group);
+      byMetaId.set(mapKey, group);
     }
     merged.push(group);
+  }
+
+  // Bitrate ranking runs after merging so it sees each movie's final,
+  // fully-combined source list rather than skipping a would-be-merged
+  // group because it looked single-source before consolidation.
+  for (const group of merged) {
+    if (group.type === 'series') {
+      group.sources.sort((a, b) => (b.completeness?.ratio ?? -1) - (a.completeness?.ratio ?? -1));
+    } else {
+      if (group.sources.length > 1) {
+        for (const source of group.sources) {
+          const info = await client.getVodInfo(source.id).catch(() => null);
+          source.bitrate = info?.info?.bitrate || null;
+        }
+      }
+      group.sources.sort((a, b) => (b.bitrate ?? -1) - (a.bitrate ?? -1));
+    }
   }
   return merged;
 }
@@ -301,6 +389,9 @@ async function handleGroup(client, group) {
         ? { name: 'Play now', value: 'play' }
         : { name: `Browse seasons/episodes (via ${best.name})`, value: 'play' },
     ];
+    if (group.type === 'movie') {
+      choices.push({ name: 'Download', value: 'download' });
+    }
     if (group.sources.length > 1) {
       choices.push({ name: `Choose a different source (${group.sources.length} available)`, value: 'choose-source' });
     }
@@ -313,6 +404,8 @@ async function handleGroup(client, group) {
     if (action === 'play') {
       if (group.type === 'movie') await playMovieWithFallback(client, group.sources);
       else await playSeriesEpisode(client, best.id);
+    } else if (action === 'download') {
+      await downloadMovie(client, best.id, group.title);
     } else if (action === 'choose-source') {
       const { chosen } = await inquirer.prompt([
         {
@@ -362,12 +455,12 @@ async function handleGroup(client, group) {
  * the generic Search entry) searches both.
  */
 const SEARCH_DEBOUNCE_MS = 350;
-const SEARCH_ENRICH_CAP = 25; // cap how many groups get TVmaze/bitrate enrichment per keystroke-settled search
+const SEARCH_ENRICH_CAP = 25; // cap how many groups get TMDB/bitrate enrichment per keystroke-settled search
 
 /**
  * Live, debounced search: results update as you type once you pause for
  * SEARCH_DEBOUNCE_MS, instead of requiring Enter first. The debounce is
- * load-bearing, not just a UX nicety — enrichment makes real TVmaze and
+ * load-bearing, not just a UX nicety — enrichment makes real TMDB and
  * Xtream calls (get_series_info/get_vod_info), and firing that on every
  * keystroke of a fast typist would hammer both far harder than a single
  * settled search does.

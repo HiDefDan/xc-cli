@@ -20,7 +20,7 @@ Build a smart Xtream Codes VOD client that:
 - Title parser (extract season/episode/language from messy names)
 - Audio codec detection (filter incompatible tracks)
 - Trakt/TVTime fetcher
-- TVmaze metadata enrichment
+- TMDB metadata enrichment
 - WireGuard VPN control
 - SQLite cache layer
 
@@ -70,7 +70,7 @@ detection/auto-select, SQLite caching.
 ## Technical Stack
 
 - **Language:** Node.js (ES modules)
-- **APIs:** Xtream Codes, Trakt, TVmaze
+- **APIs:** Xtream Codes, Trakt, TMDB
 - **Storage:** SQLite3
 - **Video:** mpv (spawned via child_process)
 - **VPN:** WireGuard (wg-quick)
