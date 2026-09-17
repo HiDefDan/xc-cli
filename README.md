@@ -1,6 +1,7 @@
 # xc-cli
 
-A lightweight CLI-based IPTV VOD player for macOS, built with Node.js.
+A lightweight CLI-based IPTV VOD player built with Node.js. No OS-specific
+code — needs Node and mpv installed, nothing more.
 
 ## Vision
 
