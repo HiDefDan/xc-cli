@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.conf
+!config/*.example.conf
+config/wireguard/
+Z*.txt
+*.sqlite
+*.sqlite3
+data/
+.DS_Store
+*.log

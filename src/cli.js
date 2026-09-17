@@ -1,0 +1,563 @@
+import inquirer from 'inquirer';
+import { play, MPV_FETCH_FAILED } from './player.js';
+import { verifyVpnActive } from './vpnCheck.js';
+import { buildIndexFromCache, searchIndex, crawlFullCatalog } from './search.js';
+import { partitionByLanguage } from './languageFilter.js';
+import { getWatchlist, addToWatchlist, removeFromWatchlist } from './watchlist.js';
+import { getLastSearchTerm, setLastSearchTerm } from './searchState.js';
+import { cleanTitle, cleanEpisodeTitle } from './titleClean.js';
+import { lookupShow, completeness } from './tvmaze.js';
+import BackableListPrompt from './backableListPrompt.js';
+import BackableAutocompletePrompt from './backableAutocompletePrompt.js';
+
+// Replaces the built-in "list" prompt everywhere in the app: Escape now
+// submits null, same as picking "← Back", instead of doing nothing.
+inquirer.registerPrompt('list', BackableListPrompt);
+inquirer.registerPrompt('autocomplete', BackableAutocompletePrompt);
+
+function extFromInfo(info, fallback = 'mp4') {
+  return info?.movie_data?.container_extension || info?.info?.container_extension || fallback;
+}
+
+/**
+ * Re-verified before every round trip to the Xtream server, not just at
+ * startup — the tunnel can drop mid-session. Nags with a retry prompt
+ * instead of silently proceeding over a leaked connection.
+ */
+async function requireVpn() {
+  for (;;) {
+    const result = await verifyVpnActive();
+    if (result.ok) return true;
+
+    console.error('\nVPN check failed — refusing to contact the Xtream server.');
+    if (result.reason === 'no-tunnel-interface') {
+      console.error('No tunnel interface (utun/tun/ppp) is the default route — VPN is not active.');
+    } else if (result.reason === 'same-as-baseline') {
+      console.error(`Current public IP (${result.current.ip}) matches your non-VPN baseline. Tunnel is down.`);
+    } else if (result.reason === 'lookup-failed') {
+      console.error(`Could not determine current public IP: ${result.error}`);
+    }
+    const { retry } = await inquirer.prompt([
+      { type: 'confirm', name: 'retry', message: 'Fix your VPN, then retry?', default: true },
+    ]);
+    if (!retry) return false;
+  }
+}
+
+/** Returns mpv's exit code (or null if a VPN check aborted before mpv even ran), so callers can tell a fetch failure apart from a normal quit. */
+async function playMovie(client, streamId, title) {
+  if (!(await requireVpn())) return null;
+  const info = await client.getVodInfo(streamId);
+  const ext = extFromInfo(info);
+  const url = client.buildVodStreamUrl(streamId, ext);
+
+  if (!(await requireVpn())) return null;
+  console.log(`Playing: ${title}`);
+  return play(url, { mpvPath: process.env.MPV_PATH, title });
+}
+
+/**
+ * Tries sources in ranked order, only advancing to the next one when mpv
+ * itself reports it couldn't fetch/open the stream — a normal quit (or any
+ * other mpv exit) is left alone rather than treated as a reason to retry.
+ */
+async function playMovieWithFallback(client, sources, startIndex = 0) {
+  for (let i = startIndex; i < sources.length; i++) {
+    const source = sources[i];
+    const code = await playMovie(client, source.id, source.name);
+    if (code === null) return; // VPN check aborted — not a source problem, retrying won't help
+    if (code !== MPV_FETCH_FAILED) return;
+    const next = sources[i + 1];
+    if (next) console.log(`"${source.name}" failed to fetch — trying next source (${next.name})...`);
+  }
+  console.log('All available sources failed to fetch.');
+}
+
+/**
+ * Season → episode navigation. "Back" at episode level returns to season
+ * list, not out of the show entirely.
+ *
+ * getExtraChoices/onExtra let a caller fold extra actions (e.g. watchlist
+ * toggle) into the season prompt itself, re-evaluated each loop pass so a
+ * label like "Add"/"Remove" stays in sync after it fires. Values are
+ * prefixed "__extra:" so they can't collide with a season key.
+ *
+ * forceRefresh bypasses the 24h series_info cache — used for watchlist
+ * entries, where the catalog is small enough that a live check on every
+ * open is cheap, and staying current matters (newly-added episodes).
+ */
+async function playSeriesEpisode(client, seriesId, { getExtraChoices, onExtra, forceRefresh = false } = {}) {
+  if (!(await requireVpn())) return;
+  if (forceRefresh) console.log('Checking for new episodes...');
+  const info = await client.getSeriesInfo(seriesId, { force: forceRefresh });
+  const showTitle = cleanTitle(info.info.name);
+  const seasons = Object.keys(info.episodes || {});
+  if (!seasons.length) {
+    console.log('No seasons found for this show.');
+    return;
+  }
+
+  for (;;) {
+    const extra = getExtraChoices ? getExtraChoices() : [];
+    const { season } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'season',
+        message: `${showTitle} — Season`,
+        choices: [
+          ...seasons.map((s) => ({ name: `Season ${s}`, value: s })),
+          ...(extra.length ? [new inquirer.Separator(), ...extra] : []),
+          new inquirer.Separator(),
+          { name: '← Back', value: null },
+        ],
+      },
+    ]);
+    if (!season) return;
+    if (season.startsWith('__extra:')) {
+      await onExtra(season);
+      continue; // re-render the season prompt so a toggled label is reflected
+    }
+
+    const episodes = info.episodes[season];
+    for (;;) {
+      const { episode } = await inquirer.prompt([
+        {
+          type: 'list',
+          name: 'episode',
+          message: 'Episode',
+          pageSize: 20,
+          choices: [
+            ...episodes.map((e) => ({ name: `E${e.episode_num} — ${cleanEpisodeTitle(e.title)}`, value: e })),
+            new inquirer.Separator(),
+            { name: '← Back', value: null },
+          ],
+        },
+      ]);
+      if (!episode) break; // back to season list
+
+      const ext = episode.container_extension || 'mp4';
+      const url = client.buildSeriesStreamUrl(episode.id, ext);
+      const episodeTitle = cleanEpisodeTitle(episode.title);
+
+      if (!(await requireVpn())) continue;
+      console.log(`Playing: ${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}`);
+      await play(url, { mpvPath: process.env.MPV_PATH, title: `${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}` });
+      // loop back to the same season's episode list so the next episode is one step away
+    }
+  }
+}
+
+
+/** Presents one search/watchlist match: play it, or manage its watchlist membership. */
+async function handleMatch(client, item, { inWatchlist }) {
+  const title = cleanTitle(item.name);
+
+  if (item.type === 'series') {
+    // Browsing is the only real action for a series here — a one-item
+    // "Browse seasons/episodes" menu just adds a step. Go straight to
+    // season selection and fold watchlist toggling into that prompt.
+    let watchlisted = inWatchlist;
+    await playSeriesEpisode(client, item.id, {
+      forceRefresh: true,
+      getExtraChoices: () => [
+        watchlisted
+          ? { name: 'Remove from watchlist', value: '__extra:remove' }
+          : { name: 'Add to watchlist', value: '__extra:add' },
+      ],
+      onExtra: async (value) => {
+        if (value === '__extra:add') {
+          await addToWatchlist(item);
+          watchlisted = true;
+          console.log(`Added "${title}" to your watchlist.`);
+        } else {
+          await removeFromWatchlist(item.type, item.id);
+          watchlisted = false;
+          console.log(`Removed "${title}" from your watchlist.`);
+        }
+      },
+    });
+    return;
+  }
+
+  const { action } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'action',
+      message: title,
+      choices: [
+        { name: 'Play now', value: 'play' },
+        inWatchlist ? { name: 'Remove from watchlist', value: 'remove' } : { name: 'Add to watchlist', value: 'add' },
+        new inquirer.Separator(),
+        { name: '← Back', value: null },
+      ],
+    },
+  ]);
+
+  if (action === 'play') {
+    await playMovie(client, item.id, title);
+  } else if (action === 'add') {
+    await addToWatchlist(item);
+    console.log(`Added "${title}" to your watchlist.`);
+  } else if (action === 'remove') {
+    await removeFromWatchlist(item.type, item.id);
+    console.log(`Removed "${title}" from your watchlist.`);
+  }
+}
+
+/**
+ * Collapses duplicate catalog entries of the same title (different
+ * category/language source, same underlying movie or show) into one
+ * group per title, and ranks each group's sources so the default pick
+ * isn't just an arbitrary catalog row:
+ *  - series: actual-vs-canonical episode count from TVmaze (one lookup
+ *    per group, not per source)
+ *  - movies: bitrate from get_vod_info — TVmaze has no movie data, and
+ *    resolution/codec aren't reliably exposed, but bitrate is, and for
+ *    same-runtime duplicates (confirmed via duration) it's a real,
+ *    comparable quality signal (seen 2180–5296 kbps across duplicates
+ *    of an identical-length file)
+ *
+ * The first pass groups by cleaned catalog title, which only catches
+ * sources whose title string is identical after cleaning. A second pass,
+ * series only, then merges any groups whose TVmaze lookup resolved to the
+ * same show id — TVmaze's fuzzy singlesearch often resolves near-miss
+ * spelling/punctuation variants across providers to one canonical show,
+ * catching duplicates the first pass's exact-string match misses. No
+ * movie equivalent: TVmaze has no movie data.
+ */
+async function buildResultGroups(client, items) {
+  const byKey = new Map();
+  for (const item of items) {
+    const title = cleanTitle(item.name);
+    const key = `${item.type}:${title}`;
+    if (!byKey.has(key)) byKey.set(key, { type: item.type, title, sources: [] });
+    byKey.get(key).sources.push(item);
+  }
+
+  const groups = [...byKey.values()];
+  for (const group of groups) {
+    if (group.type === 'series') {
+      const tvmazeData = await lookupShow(group.title).catch(() => null);
+      group.tvmazeId = tvmazeData?.id ?? null;
+      for (const source of group.sources) {
+        if (!tvmazeData) {
+          source.completeness = null;
+          continue;
+        }
+        const info = await client.getSeriesInfo(source.id).catch(() => null);
+        source.completeness = info ? completeness(info.episodes, tvmazeData) : null;
+      }
+      group.sources.sort((a, b) => (b.completeness?.ratio ?? -1) - (a.completeness?.ratio ?? -1));
+    } else if (group.sources.length > 1) {
+      // only worth the extra calls when there's actually something to rank
+      for (const source of group.sources) {
+        const info = await client.getVodInfo(source.id).catch(() => null);
+        source.bitrate = info?.info?.bitrate || null;
+      }
+      group.sources.sort((a, b) => (b.bitrate ?? -1) - (a.bitrate ?? -1));
+    }
+  }
+
+  const merged = [];
+  const byTvmazeId = new Map();
+  for (const group of groups) {
+    if (group.type === 'series' && group.tvmazeId) {
+      const existing = byTvmazeId.get(group.tvmazeId);
+      if (existing) {
+        existing.sources.push(...group.sources);
+        existing.sources.sort((a, b) => (b.completeness?.ratio ?? -1) - (a.completeness?.ratio ?? -1));
+        continue; // folded into an earlier group with the same TVmaze id
+      }
+      byTvmazeId.set(group.tvmazeId, group);
+    }
+    merged.push(group);
+  }
+  return merged;
+}
+
+function formatGroupLabel(g) {
+  const kind = g.type === 'movie' ? 'Movie' : 'Show';
+  const otherCount = g.sources.length - 1;
+  const multi = otherCount > 0 ? ` (+${otherCount} other source${otherCount === 1 ? '' : 's'})` : '';
+  let suffix = '';
+  if (g.type === 'series' && g.sources[0].completeness) {
+    const { actual, expected, ratio } = g.sources[0].completeness;
+    suffix = ` (${actual}/${expected} eps${ratio >= 1 ? '' : ' ⚠'})`;
+  } else if (g.type === 'movie' && g.sources[0].bitrate) {
+    suffix = ` (${g.sources[0].bitrate} kbps)`;
+  }
+  return `[${kind}] ${g.title}${suffix}${multi}`;
+}
+
+/** Presents one grouped result: play/browse the best (or a chosen) source, or manage its watchlist membership. */
+async function handleGroup(client, group) {
+  for (;;) {
+    const best = group.sources[0];
+    const watchlist = await getWatchlist();
+    const inWatchlist = watchlist.some((i) => i.type === group.type && i.id === best.id);
+
+    const choices = [
+      group.type === 'movie'
+        ? { name: 'Play now', value: 'play' }
+        : { name: `Browse seasons/episodes (via ${best.name})`, value: 'play' },
+    ];
+    if (group.sources.length > 1) {
+      choices.push({ name: `Choose a different source (${group.sources.length} available)`, value: 'choose-source' });
+    }
+    choices.push(inWatchlist ? { name: 'Remove from watchlist', value: 'remove' } : { name: 'Add to watchlist', value: 'add' });
+    choices.push(new inquirer.Separator());
+    choices.push({ name: '← Back', value: null });
+
+    const { action } = await inquirer.prompt([{ type: 'list', name: 'action', message: group.title, choices }]);
+
+    if (action === 'play') {
+      if (group.type === 'movie') await playMovieWithFallback(client, group.sources);
+      else await playSeriesEpisode(client, best.id);
+    } else if (action === 'choose-source') {
+      const { chosen } = await inquirer.prompt([
+        {
+          type: 'list',
+          name: 'chosen',
+          message: 'Pick a source',
+          pageSize: 20,
+          choices: [
+            ...group.sources.map((s) => {
+              const detail = s.completeness
+                ? ` (${s.completeness.actual}/${s.completeness.expected} eps)`
+                : s.bitrate
+                  ? ` (${s.bitrate} kbps)`
+                  : '';
+              return { name: `${s.name} — ${s.categoryName}${detail}`, value: s };
+            }),
+            new inquirer.Separator(),
+            { name: '← Back', value: null },
+          ],
+        },
+      ]);
+      if (chosen) {
+        if (group.type === 'movie') {
+          await playMovieWithFallback(client, group.sources, group.sources.indexOf(chosen));
+        } else {
+          await playSeriesEpisode(client, chosen.id);
+        }
+      }
+    } else if (action === 'add') {
+      await addToWatchlist(best);
+      console.log(`Added "${group.title}" to your watchlist${group.sources.length > 1 ? ` (via ${best.name})` : ''}.`);
+    } else if (action === 'remove') {
+      await removeFromWatchlist(group.type, best.id);
+      console.log(`Removed "${group.title}" from your watchlist.`);
+    } else {
+      return;
+    }
+    // loop back to this group's action menu
+  }
+}
+
+/**
+ * Search is now also how Movies/Series "browsing" works — a flat catalog
+ * has ~30k movies / ~8.7k shows even after category exclusion, too many
+ * for a scrollable list with no filtering. typeFilter narrows to just
+ * movies or just series when entered from those menu items; null (from
+ * the generic Search entry) searches both.
+ */
+const SEARCH_DEBOUNCE_MS = 350;
+const SEARCH_ENRICH_CAP = 25; // cap how many groups get TVmaze/bitrate enrichment per keystroke-settled search
+
+/**
+ * Live, debounced search: results update as you type once you pause for
+ * SEARCH_DEBOUNCE_MS, instead of requiring Enter first. The debounce is
+ * load-bearing, not just a UX nicety — enrichment makes real TVmaze and
+ * Xtream calls (get_series_info/get_vod_info), and firing that on every
+ * keystroke of a fast typist would hammer both far harder than a single
+ * settled search does.
+ */
+async function searchTitles(client, typeFilter = null) {
+  if (!(await requireVpn())) return; // category names may need a live fetch if never browsed
+  let index = await buildIndexFromCache(client);
+  if (typeFilter) index = index.filter((item) => item.type === typeFilter);
+
+  const label = typeFilter === 'movie' ? 'movies' : typeFilter === 'series' ? 'shows' : 'cached titles';
+  const sectionKey = typeFilter || 'all';
+  let generation = 0;
+  // Carried across loop iterations (and persisted to disk on the way out)
+  // so backing out of a picked result — or quitting and relaunching later
+  // — reopens search already populated instead of forcing the same query
+  // to be retyped from scratch.
+  let lastTerm = await getLastSearchTerm(sectionKey);
+
+  for (;;) {
+    const { pick } = await inquirer.prompt([
+      {
+        type: 'autocomplete',
+        name: 'pick',
+        message: `Search ${label}`,
+        pageSize: 15,
+        emptyText: 'No matches',
+        default: lastTerm || undefined,
+        source: async (answersSoFar, input) => {
+          // The library calls source(undefined) once on open, before any
+          // keypress — fall back to the remembered term so that initial
+          // call re-searches instead of coming back empty.
+          const term = (input === undefined ? lastTerm : input).trim();
+          lastTerm = term;
+          const myGen = ++generation;
+          if (!term) return [];
+
+          // Skip the debounce on that synthetic reopen call — there's no
+          // typing pause to wait out, so waiting just delays results.
+          await new Promise((resolve) => setTimeout(resolve, input === undefined ? 0 : SEARCH_DEBOUNCE_MS));
+          if (myGen !== generation) return []; // superseded by further typing — a later call will settle and win
+
+          const matches = searchIndex(index, term);
+          if (!matches.length) return [];
+
+          const { primary, rest } = partitionByLanguage(matches);
+          const shown = primary.length ? primary : rest;
+          const capped = shown.slice(0, SEARCH_ENRICH_CAP);
+
+          const groups = await buildResultGroups(client, capped);
+          const choices = groups.map((g) => ({ name: formatGroupLabel(g), value: g }));
+          if (shown.length > capped.length) {
+            choices.push({ name: `(${shown.length - capped.length} more — keep typing to narrow down)`, value: null, disabled: true });
+          }
+          return choices;
+        },
+      },
+    ]);
+
+    if (!pick) {
+      await setLastSearchTerm(sectionKey, lastTerm);
+      return;
+    }
+    await handleGroup(client, pick);
+    // loop back to a fresh search prompt
+  }
+}
+
+async function showWatchlistSection(client, type) {
+  for (;;) {
+    const list = (await getWatchlist()).filter((i) => i.type === type); // re-read each pass so a removal is reflected immediately
+    if (!list.length) return; // everything here got removed — back out to the Movies/Series chooser
+
+    const sortedList = [...list].sort((a, b) => cleanTitle(a.name).localeCompare(cleanTitle(b.name)));
+    const { pick } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'pick',
+        message: `Watchlist — ${type === 'movie' ? 'Movies' : 'Series'} (${list.length})`,
+        pageSize: 20,
+        choices: [
+          ...sortedList.map((i) => ({ name: cleanTitle(i.name), value: i })),
+          new inquirer.Separator(),
+          { name: '← Back', value: null },
+        ],
+      },
+    ]);
+    if (!pick) return;
+
+    await handleMatch(client, pick, { inWatchlist: true });
+    // loop back to this section's list
+  }
+}
+
+async function showLocalWatchlist(client) {
+  for (;;) {
+    const list = await getWatchlist();
+    if (!list.length) {
+      console.log('Your local watchlist is empty — add titles from Search.');
+      return;
+    }
+
+    const movieCount = list.filter((i) => i.type === 'movie').length;
+    const seriesCount = list.filter((i) => i.type === 'series').length;
+
+    const { section } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'section',
+        message: `Watchlist (${list.length})`,
+        choices: [
+          { name: `Movies (${movieCount})`, value: 'movie', disabled: movieCount === 0 ? 'empty' : false },
+          { name: `Series (${seriesCount})`, value: 'series', disabled: seriesCount === 0 ? 'empty' : false },
+          new inquirer.Separator(),
+          { name: '← Back', value: null },
+        ],
+      },
+    ]);
+    if (!section) return;
+
+    await showWatchlistSection(client, section);
+    // loop back to the Movies/Series chooser
+  }
+}
+
+async function runFullCrawl(client, { confirmMessage }) {
+  const { confirmed } = await inquirer.prompt([
+    { type: 'confirm', name: 'confirmed', default: false, message: confirmMessage },
+  ]);
+  if (!confirmed) return false;
+  if (!(await requireVpn())) return false;
+
+  const total = await crawlFullCatalog(client, (done, total) => {
+    if (done % 20 === 0 || done === total) console.log(`  ${done}/${total} categories indexed...`);
+  });
+  console.log(`Done — indexed ${total} categories.`);
+  return true;
+}
+
+async function buildFullSearchIndex(client) {
+  await runFullCrawl(client, {
+    confirmMessage:
+      'This fetches every movie/series category live (~800 categories, several minutes even with throttling). Continue?',
+  });
+}
+
+export async function runMenu(client) {
+  let exit = false;
+  // Top level has no "← Back" to go to, so Escape/Left submits null here —
+  // easy to trigger by accident while used to it meaning "back" one level
+  // down. Require it twice in a row (with nothing else pressed between)
+  // before actually quitting.
+  let armedToQuit = false;
+  while (!exit) {
+    const { section } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'section',
+        message: 'Xtream VOD Player',
+        choices: [
+          { name: 'Movies', value: 'movies' },
+          { name: 'Series', value: 'series' },
+          { name: 'Search', value: 'search' },
+          { name: 'Watchlist', value: 'watchlist' },
+          new inquirer.Separator(),
+          { name: 'Build Full Search Index (slow)', value: 'index' },
+          new inquirer.Separator(),
+          { name: 'Quit', value: 'quit' },
+        ],
+      },
+    ]);
+
+    if (section === null) {
+      if (armedToQuit) exit = true;
+      else {
+        armedToQuit = true;
+        console.log('Press ← (or Esc) again to quit.');
+      }
+      continue;
+    }
+    armedToQuit = false;
+
+    try {
+      if (section === 'movies') await searchTitles(client, 'movie');
+      else if (section === 'series') await searchTitles(client, 'series');
+      else if (section === 'search') await searchTitles(client);
+      else if (section === 'watchlist') await showLocalWatchlist(client);
+      else if (section === 'index') await buildFullSearchIndex(client);
+      else exit = true; // 'quit' chosen directly from the list
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+    }
+  }
+}
