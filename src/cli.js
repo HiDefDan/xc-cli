@@ -520,6 +520,29 @@ async function showWatchlistSection(client, type) {
   }
 }
 
+/** Bare Movies/Series chooser in front of the same searchTitles() calls the old top-level Movies/Series items used directly. */
+async function showBrowse(client) {
+  for (;;) {
+    const { section } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'section',
+        message: 'Browse',
+        choices: [
+          { name: 'Movies', value: 'movie' },
+          { name: 'Series', value: 'series' },
+          new inquirer.Separator(),
+          { name: '← Back', value: null },
+        ],
+      },
+    ]);
+    if (!section) return;
+
+    await searchTitles(client, section);
+    // loop back to the Movies/Series chooser
+  }
+}
+
 async function showLocalWatchlist(client) {
   for (;;) {
     const list = await getWatchlist();
@@ -571,6 +594,28 @@ async function buildFullSearchIndex(client) {
   });
 }
 
+/** Single-action for now — a home for maintenance/admin actions as they show up, rather than cluttering the top-level menu. */
+async function showSettings(client) {
+  for (;;) {
+    const { action } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'Settings',
+        choices: [
+          { name: '(Re)build full search index — update catalog (slow)', value: 'index' },
+          new inquirer.Separator(),
+          { name: '← Back', value: null },
+        ],
+      },
+    ]);
+    if (!action) return;
+
+    await buildFullSearchIndex(client);
+    // loop back to Settings
+  }
+}
+
 export async function runMenu(client) {
   let exit = false;
   // Top level has no "← Back" to go to, so Escape/Left submits null here —
@@ -585,14 +630,10 @@ export async function runMenu(client) {
         name: 'section',
         message: 'Xtream VOD Player',
         choices: [
-          { name: 'Movies', value: 'movies' },
-          { name: 'Series', value: 'series' },
-          { name: 'Search', value: 'search' },
           { name: 'Watchlist', value: 'watchlist' },
-          new inquirer.Separator(),
-          { name: 'Build Full Search Index (slow)', value: 'index' },
-          new inquirer.Separator(),
-          { name: 'Quit', value: 'quit' },
+          { name: 'Search', value: 'search' },
+          { name: 'Browse', value: 'browse' },
+          { name: 'Settings', value: 'settings' },
         ],
       },
     ]);
@@ -608,12 +649,10 @@ export async function runMenu(client) {
     armedToQuit = false;
 
     try {
-      if (section === 'movies') await searchTitles(client, 'movie');
-      else if (section === 'series') await searchTitles(client, 'series');
+      if (section === 'watchlist') await showLocalWatchlist(client);
       else if (section === 'search') await searchTitles(client);
-      else if (section === 'watchlist') await showLocalWatchlist(client);
-      else if (section === 'index') await buildFullSearchIndex(client);
-      else exit = true; // 'quit' chosen directly from the list
+      else if (section === 'browse') await showBrowse(client);
+      else if (section === 'settings') await showSettings(client);
     } catch (err) {
       console.error(`Error: ${err.message}`);
     }

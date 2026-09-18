@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/). This
 project is still in initial development (`0.y.z`) — anything may change at
 any time, per SemVer's own rules for major version zero.
 
+## [0.5.0] - 2026-09-18
+
+### Changed
+- Top-level menu reorganized: `Watchlist`, `Search`, `Browse`, `Settings`
+  — no more separate `Movies`/`Series` items (now a bare Movies/Series
+  chooser under `Browse`, mirroring the Watchlist chooser's shape) and
+  no visible `Quit` row (the existing double Escape/Left "press again to
+  quit" arm-to-quit already covers it, consistently with how Escape/Left
+  means "back" everywhere else in the app).
+- "Build Full Search Index" moved under the new `Settings` screen and
+  renamed "(Re)build full search index — update catalog (slow)".
+
 ## [0.4.2] - 2026-09-18
 
 ### Fixed
