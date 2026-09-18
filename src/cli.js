@@ -250,25 +250,15 @@ async function handleMatch(client, item, { inWatchlist }) {
 }
 
 /**
- * Collapses duplicate catalog entries of the same title (different
- * category/language source, same underlying movie or show) into one
- * group per title, and ranks each group's sources so the default pick
- * isn't just an arbitrary catalog row:
- *  - series: actual-vs-canonical episode count from TMDB (one lookup
- *    per group, not per source)
- *  - movies: bitrate from get_vod_info — resolution/codec aren't
- *    reliably exposed, but bitrate is, and for same-runtime duplicates
- *    (confirmed via duration) it's a real, comparable quality signal
- *    (seen 2180–5296 kbps across duplicates of an identical-length file)
- *
- * The first pass groups by cleaned catalog title, which only catches
- * sources whose title string is identical after cleaning. A second pass
- * then merges any groups whose TMDB lookup resolved to the same
- * movie/show id — TMDB's search often resolves near-miss
- * spelling/punctuation variants across providers to one canonical title,
- * catching duplicates the first pass's exact-string match misses.
+ * Pass 1 of grouping: buckets raw catalog items by cleaned title alone —
+ * free, local, no network. Deliberately takes the full, uncapped match
+ * list (not a pre-truncated subset) so a real duplicate source is never
+ * invisible to grouping just because of its position in an unsorted
+ * catalog match list; only catches sources whose title string is
+ * identical after cleaning — near-miss spelling/punctuation variants are
+ * enrichAndMergeGroups's job below.
  */
-async function buildResultGroups(client, items) {
+function groupByCleanedTitle(items) {
   const byKey = new Map();
   for (const item of items) {
     const title = cleanTitle(item.name);
@@ -276,13 +266,39 @@ async function buildResultGroups(client, items) {
     if (!byKey.has(key)) byKey.set(key, { type: item.type, title, sources: [] });
     byKey.get(key).sources.push(item);
   }
+  return [...byKey.values()];
+}
 
-  const groups = [...byKey.values()];
+// Once Pass 1 runs over an uncapped match list, a single group's sources
+// can grow past what's reasonable to rank in one search (a heavily
+// duplicated title could fold in dozens) — this only bites on that
+// title's first search, since getSeriesInfo/getVodInfo cache for 24h,
+// but still worth a clean bound. Ranked sources sort first (existing
+// comparators already sort null-scored entries last); the rest stay
+// fully visible/selectable via "Choose a different source", just unranked.
+const SOURCE_RANK_CAP = 10;
+
+/**
+ * Pass 2: ranks each (already Pass-1-grouped, already capped) group's
+ * sources so the default pick isn't just an arbitrary catalog row —
+ *  - series: actual-vs-canonical episode count from TMDB (one lookup
+ *    per group, not per source)
+ *  - movies: bitrate from get_vod_info — resolution/codec aren't
+ *    reliably exposed, but bitrate is, and for same-runtime duplicates
+ *    (confirmed via duration) it's a real, comparable quality signal
+ *    (seen 2180–5296 kbps across duplicates of an identical-length file)
+ *
+ * — then merges any groups whose TMDB lookup resolved to the same
+ * movie/show id — TMDB's search often resolves near-miss
+ * spelling/punctuation variants across providers to one canonical title,
+ * catching duplicates Pass 1's exact-string match misses.
+ */
+async function enrichAndMergeGroups(client, groups) {
   for (const group of groups) {
     if (group.type === 'series') {
       const tmdbData = await lookupShow(group.title).catch(() => null);
       group.metaId = tmdbData?.id ?? null;
-      for (const source of group.sources) {
+      for (const source of group.sources.slice(0, SOURCE_RANK_CAP)) {
         if (!tmdbData) {
           source.completeness = null;
           continue;
@@ -319,7 +335,7 @@ async function buildResultGroups(client, items) {
       group.sources.sort((a, b) => (b.completeness?.ratio ?? -1) - (a.completeness?.ratio ?? -1));
     } else {
       if (group.sources.length > 1) {
-        for (const source of group.sources) {
+        for (const source of group.sources.slice(0, SOURCE_RANK_CAP)) {
           const info = await client.getVodInfo(source.id).catch(() => null);
           source.bitrate = info?.info?.bitrate || null;
         }
@@ -422,7 +438,12 @@ async function handleGroup(client, group) {
  * the generic Search entry) searches both.
  */
 const SEARCH_DEBOUNCE_MS = 350;
-const SEARCH_ENRICH_CAP = 25; // cap how many groups get TMDB/bitrate enrichment per keystroke-settled search
+// Caps distinct titles (post Pass-1 string-bucketing), not raw catalog
+// rows — bucketing itself is free/local and always runs over every
+// match, so a real duplicate source is never dropped just because of its
+// position in an unsorted match list. This only bounds how many DISTINCT
+// titles get the expensive TMDB/Xtream enrichment treatment.
+const SEARCH_ENRICH_CAP = 25;
 
 /**
  * Live, debounced search: results update as you type once you pause for
@@ -473,12 +494,27 @@ async function searchTitles(client, typeFilter = null) {
 
           const { primary, rest } = partitionByLanguage(matches);
           const shown = primary.length ? primary : rest;
-          const capped = shown.slice(0, SEARCH_ENRICH_CAP);
 
-          const groups = await buildResultGroups(client, capped);
+          // Pass 1: free, local, over every match — no cap, so a real
+          // duplicate source is never dropped for raw-ranking reasons,
+          // only ever folded into its group.
+          const allGroups = groupByCleanedTitle(shown);
+          const capped = allGroups.slice(0, SEARCH_ENRICH_CAP);
+
+          // A later keystroke may have superseded this call during Pass 1
+          // — bail before spending TMDB/Xtream calls on results about to
+          // be discarded.
+          if (myGen !== generation) return [];
+
+          const groups = await enrichAndMergeGroups(client, capped);
           const choices = groups.map((g) => ({ name: formatGroupLabel(g), value: g }));
-          if (shown.length > capped.length) {
-            choices.push({ name: `(${shown.length - capped.length} more — keep typing to narrow down)`, value: null, disabled: true });
+          if (allGroups.length > capped.length) {
+            const hidden = allGroups.length - capped.length;
+            choices.push({
+              name: `(${hidden} more distinct title${hidden === 1 ? '' : 's'} — keep typing to narrow down)`,
+              value: null,
+              disabled: true,
+            });
           }
           return choices;
         },

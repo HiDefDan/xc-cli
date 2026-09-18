@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/). This
 project is still in initial development (`0.y.z`) — anything may change at
 any time, per SemVer's own rules for major version zero.
 
+## [0.5.1] - 2026-09-18
+
+### Fixed
+- Search result grouping was truncating the raw, undeduplicated catalog
+  match list to 25 items *before* any grouping ran, so a genuine
+  duplicate source of a searched title could be entirely invisible to
+  grouping/ranking/"Choose a different source" — not because it wasn't
+  really the same title, just because of its position in an unsorted
+  match list. Grouping by cleaned title now runs over the full match set
+  first (free, local, no network); the 25-item cap now applies to
+  distinct titles before the paid TMDB/Xtream enrichment step, not to
+  raw rows before grouping.
+- Added a per-group source-ranking cap (10) as a companion fix, since a
+  heavily-duplicated title's group can now be much larger than before —
+  only the first 10 sources per group get ranked; the rest stay fully
+  visible/selectable via "Choose a different source", just unranked.
+
 ## [0.5.0] - 2026-09-18
 
 ### Changed
