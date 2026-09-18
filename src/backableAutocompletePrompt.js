@@ -4,21 +4,26 @@ import { takeUntil } from 'rxjs';
 
 /**
  * Same Escape/Left-to-Back and Right-to-Select behavior as
- * BackableListPrompt, for the autocomplete/live-search prompt. Both arrow
- * keys only fire when the cursor has nothing to move into in that
- * direction (start-of-line for Left, end-of-line for Right) — otherwise
- * they're left alone as the normal in-line cursor-move used to edit a
- * typed query, so fixing a typo mid-string still works.
+ * BackableListPrompt, for the autocomplete/live-search prompt.
+ *
+ * Left only backs out when the box is genuinely EMPTY, not merely when
+ * the cursor happens to be at position 0 — cursor-at-0 also happens
+ * mid-edit (navigating to the start of a typed query to fix a typo),
+ * which is a completely normal editing action, not an attempt to back
+ * out. Treating it as Back destroyed whatever was typed on one stray
+ * Left press. Right-to-select doesn't have the same problem: cursor
+ * lands at end-of-line naturally after typing (the common resting
+ * state), not only via deliberate navigation, so there's no equivalent
+ * "innocent" case to protect against there.
  */
 export default class BackableAutocompletePrompt extends AutocompletePrompt {
   _run(cb) {
     const events = observe(this.rl);
     events.keypress.pipe(takeUntil(events.line)).forEach(({ key }) => {
       if (this.answer !== undefined) return;
-      const atStart = this.rl.cursor === 0;
       const atEnd = this.rl.cursor === this.rl.line.length;
 
-      if (key?.name === 'escape' || (key?.name === 'left' && atStart)) {
+      if (key?.name === 'escape' || (key?.name === 'left' && !this.rl.line)) {
         this.answer = null;
         this.answerName = '← Back'; // render() falls back to raw this.answer ("null") otherwise
         this.status = 'answered';
