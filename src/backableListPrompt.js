@@ -22,7 +22,19 @@ export default class BackableListPrompt extends ListPrompt {
         // still-highlighted choice's label in scrollback, which reads
         // as if that option had been chosen rather than backed out of.
         const backIndex = this.opt.choices.realChoices?.findIndex((c) => c.value === null);
-        if (backIndex >= 0) this.selected = backIndex;
+        if (backIndex >= 0) {
+          this.selected = backIndex;
+        } else {
+          // No explicit "← Back"/Quit choice exists on this menu (e.g.
+          // the top-level menu, which relies on Escape/Left alone) —
+          // render() always looks up getChoice(this.selected) for the
+          // collapsed line, so without a real backIndex to point at,
+          // it'd show whatever's currently highlighted instead. Patch
+          // just that one lookup rather than reimplementing render().
+          const original = this.opt.choices.getChoice.bind(this.opt.choices);
+          this.opt.choices.getChoice = (i) =>
+            i === this.selected ? { name: '← Back', short: '← Back', value: null } : original(i);
+        }
         this.onSubmit(null);
       } else if (key?.name === 'right') {
         // Reuses the library's own submit path (readline's 'line' event)

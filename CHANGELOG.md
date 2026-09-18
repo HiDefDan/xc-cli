@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/). This
 project is still in initial development (`0.y.z`) — anything may change at
 any time, per SemVer's own rules for major version zero.
 
+## [0.4.2] - 2026-09-18
+
+### Fixed
+- `BackableListPrompt`'s collapsed-line display (the line shown after a
+  menu is answered) fell back to showing the currently-highlighted
+  choice's name when Escape/Left was pressed on a menu with no explicit
+  "← Back"/Quit choice to point at — misleadingly looking like that item
+  had been chosen. Now shows "← Back" in that case instead.
+
 ## [0.4.1] - 2026-09-17
 
 ### Reverted
