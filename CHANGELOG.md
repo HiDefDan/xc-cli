@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/). This
 project is still in initial development (`0.y.z`) — anything may change at
 any time, per SemVer's own rules for major version zero.
 
+## [0.6.0] - 2026-09-18
+
+### Changed
+- Search results no longer show "(+N other sources)" or a provider name
+  in the Browse/watchlist labels — v0.5.1 already made grouping
+  correctly merge every real duplicate source; this is the matching
+  UI change so "which provider it came from" stops being surfaced at
+  all for the common case.
+- Movies drop the manual "Choose a different source" screen entirely —
+  they already fall back through every ranked source automatically
+  (`playMovieWithFallback`) on a fetch failure, so it added a step
+  without adding capability.
+- Series keep "Choose a different source" as a manual escape hatch,
+  since there's no automatic per-episode source resolution yet (that's
+  the larger, separately-tracked "unified show directory" idea) — an
+  asymmetry between movies and series worth knowing about, not an
+  oversight.
+
 ## [0.5.1] - 2026-09-18
 
 ### Fixed

@@ -348,8 +348,6 @@ async function enrichAndMergeGroups(client, groups) {
 
 function formatGroupLabel(g) {
   const kind = g.type === 'movie' ? 'Movie' : 'Show';
-  const otherCount = g.sources.length - 1;
-  const multi = otherCount > 0 ? ` (+${otherCount} other source${otherCount === 1 ? '' : 's'})` : '';
   let suffix = '';
   if (g.type === 'series' && g.sources[0].completeness) {
     const { actual, expected, ratio } = g.sources[0].completeness;
@@ -357,7 +355,7 @@ function formatGroupLabel(g) {
   } else if (g.type === 'movie' && g.sources[0].bitrate) {
     suffix = ` (${g.sources[0].bitrate} kbps)`;
   }
-  return `[${kind}] ${g.title}${suffix}${multi}`;
+  return `[${kind}] ${g.title}${suffix}`;
 }
 
 /** Presents one grouped result: play/browse the best (or a chosen) source, or manage its watchlist membership. */
@@ -370,12 +368,18 @@ async function handleGroup(client, group) {
     const choices = [
       group.type === 'movie'
         ? { name: 'Play now', value: 'play' }
-        : { name: `Browse seasons/episodes (via ${best.name})`, value: 'play' },
+        : { name: 'Browse seasons/episodes', value: 'play' },
     ];
     if (group.type === 'movie') {
       choices.push({ name: 'Download', value: 'download' });
     }
-    if (group.sources.length > 1) {
+    // Movies already fall back through every ranked source automatically
+    // (playMovieWithFallback) on a fetch failure, so a manual picker adds
+    // a step without adding capability. Series have no such fallback yet
+    // (single source, no per-episode resolution — that's the bigger,
+    // not-yet-built "step 2" idea) — keeping a manual escape hatch there
+    // until that exists.
+    if (group.type === 'series' && group.sources.length > 1) {
       choices.push({ name: `Choose a different source (${group.sources.length} available)`, value: 'choose-source' });
     }
     choices.push(inWatchlist ? { name: 'Remove from watchlist', value: 'remove' } : { name: 'Add to watchlist', value: 'add' });
@@ -390,6 +394,10 @@ async function handleGroup(client, group) {
     } else if (action === 'download') {
       await downloadMovie(client, best.id, group.title);
     } else if (action === 'choose-source') {
+      // Series-only escape hatch (see the choices array above) — the
+      // provider/category name is genuinely needed here, unlike
+      // elsewhere, since it's the only thing distinguishing otherwise
+      // identical-looking entries when picking manually.
       const { chosen } = await inquirer.prompt([
         {
           type: 'list',
@@ -398,11 +406,7 @@ async function handleGroup(client, group) {
           pageSize: 20,
           choices: [
             ...group.sources.map((s) => {
-              const detail = s.completeness
-                ? ` (${s.completeness.actual}/${s.completeness.expected} eps)`
-                : s.bitrate
-                  ? ` (${s.bitrate} kbps)`
-                  : '';
+              const detail = s.completeness ? ` (${s.completeness.actual}/${s.completeness.expected} eps)` : '';
               return { name: `${s.name} — ${s.categoryName}${detail}`, value: s };
             }),
             new inquirer.Separator(),
@@ -410,16 +414,10 @@ async function handleGroup(client, group) {
           ],
         },
       ]);
-      if (chosen) {
-        if (group.type === 'movie') {
-          await playMovieWithFallback(client, group.sources, group.sources.indexOf(chosen));
-        } else {
-          await playSeriesEpisode(client, chosen.id);
-        }
-      }
+      if (chosen) await playSeriesEpisode(client, chosen.id);
     } else if (action === 'add') {
       await addToWatchlist(best);
-      console.log(`Added "${group.title}" to your watchlist${group.sources.length > 1 ? ` (via ${best.name})` : ''}.`);
+      console.log(`Added "${group.title}" to your watchlist.`);
     } else if (action === 'remove') {
       await removeFromWatchlist(group.type, best.id);
       console.log(`Removed "${group.title}" from your watchlist.`);
