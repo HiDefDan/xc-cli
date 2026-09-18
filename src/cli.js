@@ -373,15 +373,6 @@ async function handleGroup(client, group) {
     if (group.type === 'movie') {
       choices.push({ name: 'Download', value: 'download' });
     }
-    // Movies already fall back through every ranked source automatically
-    // (playMovieWithFallback) on a fetch failure, so a manual picker adds
-    // a step without adding capability. Series have no such fallback yet
-    // (single source, no per-episode resolution — that's the bigger,
-    // not-yet-built "step 2" idea) — keeping a manual escape hatch there
-    // until that exists.
-    if (group.type === 'series' && group.sources.length > 1) {
-      choices.push({ name: `Choose a different source (${group.sources.length} available)`, value: 'choose-source' });
-    }
     choices.push(inWatchlist ? { name: 'Remove from watchlist', value: 'remove' } : { name: 'Add to watchlist', value: 'add' });
     choices.push(new inquirer.Separator());
     choices.push({ name: '← Back', value: null });
@@ -393,28 +384,6 @@ async function handleGroup(client, group) {
       else await playSeriesEpisode(client, best.id);
     } else if (action === 'download') {
       await downloadMovie(client, best.id, group.title);
-    } else if (action === 'choose-source') {
-      // Series-only escape hatch (see the choices array above) — the
-      // provider/category name is genuinely needed here, unlike
-      // elsewhere, since it's the only thing distinguishing otherwise
-      // identical-looking entries when picking manually.
-      const { chosen } = await inquirer.prompt([
-        {
-          type: 'list',
-          name: 'chosen',
-          message: 'Pick a source',
-          pageSize: 20,
-          choices: [
-            ...group.sources.map((s) => {
-              const detail = s.completeness ? ` (${s.completeness.actual}/${s.completeness.expected} eps)` : '';
-              return { name: `${s.name} — ${s.categoryName}${detail}`, value: s };
-            }),
-            new inquirer.Separator(),
-            { name: '← Back', value: null },
-          ],
-        },
-      ]);
-      if (chosen) await playSeriesEpisode(client, chosen.id);
     } else if (action === 'add') {
       await addToWatchlist(best);
       console.log(`Added "${group.title}" to your watchlist.`);
