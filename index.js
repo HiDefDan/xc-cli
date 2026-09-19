@@ -1,6 +1,16 @@
 import 'dotenv/config';
 import { XtreamClient } from './src/xtream.js';
 import { runMenu } from './src/cli.js';
+import { abandonAll } from './src/downloadManager.js';
+
+// A killed process never reaches downloadStream's own catch-block
+// cleanup, so a Ctrl+C mid-download would otherwise leave a stray partial
+// file behind (true even before background downloads existed — this
+// closes a pre-existing gap, not one introduced by backgrounding).
+process.on('SIGINT', async () => {
+  await abandonAll();
+  process.exit(130); // 128 + SIGINT's signal number 2, standard convention
+});
 
 const { XTREAM_SERVER, XTREAM_USER, XTREAM_PASS } = process.env;
 

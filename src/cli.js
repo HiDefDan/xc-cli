@@ -1,6 +1,7 @@
 import inquirer from 'inquirer';
 import { play, MPV_FETCH_FAILED } from './player.js';
-import { downloadStream } from './downloader.js';
+import { hasActiveDownload, startDownload, listDownloads, clearFinished } from './downloadManager.js';
+import { formatProgress } from './downloader.js';
 import { buildIndexFromCache, searchIndex, crawlFullCatalog } from './search.js';
 import { partitionByLanguage } from './languageFilter.js';
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from './watchlist.js';
@@ -19,8 +20,32 @@ function extFromInfo(info, fallback = 'mp4') {
   return info?.movie_data?.container_extension || info?.info?.container_extension || fallback;
 }
 
+/**
+ * Checked only where a second real stream connection would actually open
+ * (never at metadata/browsing calls) — the account was observed to report
+ * max_connections: 1 early in this project, which for Xtream-style panels
+ * usually means concurrent video-stream sessions specifically, not API
+ * calls. Unconfirmed for this exact provider, so a confirm rather than a
+ * hard block: wrong to silently refuse on an account that does support
+ * more than one stream, but a silently-failing second stream is worse
+ * than a one-line prompt.
+ */
+async function guardSecondStream(actionLabel) {
+  if (!hasActiveDownload()) return true;
+  const { proceed } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'proceed',
+      default: false,
+      message: `A download is in progress — ${actionLabel} anyway? (your account may only support one active stream)`,
+    },
+  ]);
+  return proceed;
+}
+
 /** Returns mpv's exit code, so callers can tell a fetch failure apart from a normal quit. */
 async function playMovie(client, streamId, title) {
+  if (!(await guardSecondStream('play'))) return null;
   const info = await client.getVodInfo(streamId);
   const ext = extFromInfo(info);
   const url = client.buildVodStreamUrl(streamId, ext);
@@ -33,13 +58,7 @@ async function downloadMovie(client, streamId, title) {
   const info = await client.getVodInfo(streamId);
   const ext = extFromInfo(info);
   const url = client.buildVodStreamUrl(streamId, ext);
-
-  console.log(`Downloading: ${title}`);
-  try {
-    await downloadStream(url, `${title}.${ext}`);
-  } catch (err) {
-    console.error(`Download failed: ${err.message}`);
-  }
+  await startDownload(url, `${title}.${ext}`, title);
 }
 
 async function downloadEpisode(client, showTitle, season, episode) {
@@ -49,13 +68,7 @@ async function downloadEpisode(client, showTitle, season, episode) {
   const seasonNum = String(season).padStart(2, '0');
   const episodeNum = String(episode.episode_num).padStart(2, '0');
   const filename = `${showTitle} - S${seasonNum}E${episodeNum} - ${episodeTitle}.${ext}`;
-
-  console.log(`Downloading: ${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}`);
-  try {
-    await downloadStream(url, filename);
-  } catch (err) {
-    console.error(`Download failed: ${err.message}`);
-  }
+  await startDownload(url, filename, `${showTitle} S${season}E${episode.episode_num}`);
 }
 
 /** Lets the user pick a season, then an episode, to download — separate from the play loop above so "Play now" stays a single, fast keystroke. */
@@ -182,8 +195,10 @@ async function playSeriesEpisode(client, seriesId, { getExtraChoices, onExtra, f
       const url = client.buildSeriesStreamUrl(episode.id, ext);
       const episodeTitle = cleanEpisodeTitle(episode.title);
 
-      console.log(`Playing: ${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}`);
-      await play(url, { mpvPath: process.env.MPV_PATH, title: `${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}` });
+      if (await guardSecondStream('play')) {
+        console.log(`Playing: ${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}`);
+        await play(url, { mpvPath: process.env.MPV_PATH, title: `${showTitle} S${season}E${episode.episode_num} — ${episodeTitle}` });
+      }
       // loop back to the same season's episode list so the next episode is one step away
     }
   }
@@ -636,6 +651,72 @@ async function showSettings(client) {
   }
 }
 
+/**
+ * Snapshot-on-visit, not a live-updating view — a download's own progress
+ * counters update in memory on every chunk regardless of who's watching,
+ * so a fresh console.log() here is already zero-lag. A live view would
+ * mean a second thing trying to own terminal output alongside inquirer's
+ * own prompt rendering, which is exactly what backgrounding downloads had
+ * to avoid in the first place.
+ */
+async function showDownloads(client) {
+  let lastAction;
+  for (;;) {
+    const downloads = listDownloads();
+    if (!downloads.length) {
+      console.log('No downloads yet.');
+    } else {
+      for (const d of downloads) {
+        if (d.status === 'downloading') {
+          console.log(`⬇ ${d.title} — ${formatProgress(d.downloaded, d.total)}`);
+        } else if (d.status === 'done') {
+          console.log(`✓ ${d.title} — saved to ${d.destPath}`);
+        } else {
+          console.log(`✗ ${d.title} — failed: ${d.error}`);
+        }
+      }
+    }
+
+    const hasFinished = downloads.some((d) => d.status !== 'downloading');
+    const { action } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'Downloads',
+        default: lastAction,
+        choices: [
+          { name: 'Refresh', value: 'refresh' },
+          ...(hasFinished ? [{ name: 'Clear finished', value: 'clear' }] : []),
+          new inquirer.Separator(),
+          { name: '← Back', value: null },
+        ],
+      },
+    ]);
+    if (!action) return;
+    lastAction = action;
+
+    if (action === 'clear') clearFinished();
+    // 'refresh' (or having just cleared) loops back and reprints the list
+  }
+}
+
+// Not decoration — a background download failure prints nothing to the
+// terminal by design (to avoid corrupting an active prompt), so this
+// label changing on the next menu render is how a failure actually gets
+// noticed without the user needing to remember to check.
+function downloadsMenuLabel() {
+  const downloads = listDownloads();
+  const active = downloads.filter((d) => d.status === 'downloading').length;
+  const done = downloads.filter((d) => d.status === 'done').length;
+  const failed = downloads.filter((d) => d.status === 'failed').length;
+  if (!active && !done && !failed) return 'Downloads';
+  const parts = [];
+  if (active) parts.push(`${active} active`);
+  if (done) parts.push(`${done} done`);
+  if (failed) parts.push(`${failed} failed`);
+  return `Downloads (${parts.join(', ')})`;
+}
+
 export async function runMenu(client) {
   let exit = false;
   // Top level has no "← Back" to go to, so Escape/Left submits null here —
@@ -655,14 +736,19 @@ export async function runMenu(client) {
           { name: 'Watchlist', value: 'watchlist' },
           { name: 'Search', value: 'search' },
           { name: 'Browse', value: 'browse' },
+          { name: downloadsMenuLabel(), value: 'downloads' },
           { name: 'Settings', value: 'settings' },
         ],
       },
     ]);
 
     if (section === null) {
-      if (armedToQuit) exit = true;
-      else {
+      if (armedToQuit) {
+        exit = true;
+        if (hasActiveDownload()) {
+          console.log('Download(s) still in progress — xc-cli will exit once they finish (Ctrl+C to abandon).');
+        }
+      } else {
         armedToQuit = true;
         console.log('Press ← (or Esc) again to quit.');
       }
@@ -674,6 +760,7 @@ export async function runMenu(client) {
     try {
       if (section === 'watchlist') await showLocalWatchlist(client);
       else if (section === 'search') await searchTitles(client);
+      else if (section === 'downloads') await showDownloads(client);
       else if (section === 'browse') await showBrowse(client);
       else if (section === 'settings') await showSettings(client);
     } catch (err) {

@@ -19,10 +19,29 @@ function sanitizeFilename(name) {
   return name.replace(/[/\\?%*:|"<>]/g, '-').trim();
 }
 
-/** Downloads a stream URL to DOWNLOAD_DIR with live progress, removing the partial file if the download fails or is interrupted. */
-export async function downloadStream(url, filename) {
+/** Deterministic from filename alone — lets a caller know where a download will land before (or without) awaiting it, e.g. to clean up a still-in-flight file on SIGINT. */
+export function getDestPath(filename) {
+  return path.join(DOWNLOAD_DIR, sanitizeFilename(filename));
+}
+
+/** Formats a downloaded/total byte pair as a human-readable progress string, e.g. "12.3MB / 45.6MB (27%)" or just "12.3MB" when total is unknown. */
+export function formatProgress(downloaded, total) {
+  const mb = (downloaded / 1024 / 1024).toFixed(1);
+  return total
+    ? `${mb}MB / ${(total / 1024 / 1024).toFixed(1)}MB (${((downloaded / total) * 100).toFixed(0)}%)`
+    : `${mb}MB`;
+}
+
+/**
+ * Downloads a stream URL to DOWNLOAD_DIR, removing the partial file if the
+ * download fails or is interrupted. Pure I/O — no terminal output of its
+ * own (callers may run this in the background while a menu prompt is
+ * actively rendering, and a raw terminal write here would corrupt that);
+ * progress is reported via onProgress(downloaded, total) instead.
+ */
+export async function downloadStream(url, filename, { onProgress } = {}) {
   await mkdir(DOWNLOAD_DIR, { recursive: true });
-  const destPath = path.join(DOWNLOAD_DIR, sanitizeFilename(filename));
+  const destPath = getDestPath(filename);
 
   const response = await axios.get(url, { responseType: 'stream', timeout: 15000 });
   const total = Number(response.headers['content-length']) || null;
@@ -31,11 +50,7 @@ export async function downloadStream(url, filename) {
   const writer = createWriteStream(destPath);
   response.data.on('data', (chunk) => {
     downloaded += chunk.length;
-    const mb = (downloaded / 1024 / 1024).toFixed(1);
-    const progress = total
-      ? `${mb}MB / ${(total / 1024 / 1024).toFixed(1)}MB (${((downloaded / total) * 100).toFixed(0)}%)`
-      : `${mb}MB`;
-    process.stdout.write(`\r  Downloading... ${progress}`);
+    onProgress?.(downloaded, total);
   });
 
   try {
@@ -45,11 +60,8 @@ export async function downloadStream(url, filename) {
       writer.on('error', reject);
       response.data.on('error', reject);
     });
-    process.stdout.write('\n');
-    console.log(`Saved: ${destPath}`);
     return destPath;
   } catch (err) {
-    process.stdout.write('\n');
     writer.close();
     await unlink(destPath).catch(() => {});
     throw err;
