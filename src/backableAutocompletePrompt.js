@@ -6,15 +6,18 @@ import { takeUntil } from 'rxjs';
  * Same Escape/Left-to-Back and Right-to-Select behavior as
  * BackableListPrompt, for the autocomplete/live-search prompt.
  *
- * Left only backs out when the box is genuinely EMPTY, not merely when
- * the cursor happens to be at position 0 — cursor-at-0 also happens
- * mid-edit (navigating to the start of a typed query to fix a typo),
- * which is a completely normal editing action, not an attempt to back
- * out. Treating it as Back destroyed whatever was typed on one stray
- * Left press. Right-to-select doesn't have the same problem: cursor
- * lands at end-of-line naturally after typing (the common resting
- * state), not only via deliberate navigation, so there's no equivalent
- * "innocent" case to protect against there.
+ * Left only backs out when the box is genuinely EMPTY or still shows
+ * exactly the pre-filled default untouched, not merely when the cursor
+ * happens to be at position 0 — cursor-at-0 also happens mid-edit
+ * (navigating to the start of a typed query to fix a typo), which is a
+ * completely normal editing action, not an attempt to back out. Treating
+ * it as Back destroyed whatever was typed on one stray Left press. A
+ * pre-fill you haven't touched yet counts the same as empty from your
+ * perspective (you didn't ask for that text) — the moment you edit it,
+ * Left goes back to pure cursor-navigation. Right-to-select doesn't have
+ * the same problem: cursor lands at end-of-line naturally after typing
+ * (the common resting state), not only via deliberate navigation, so
+ * there's no equivalent "innocent" case to protect against there.
  */
 export default class BackableAutocompletePrompt extends AutocompletePrompt {
   _run(cb) {
@@ -22,8 +25,9 @@ export default class BackableAutocompletePrompt extends AutocompletePrompt {
     events.keypress.pipe(takeUntil(events.line)).forEach(({ key }) => {
       if (this.answer !== undefined) return;
       const atEnd = this.rl.cursor === this.rl.line.length;
+      const untouched = !this.rl.line || this.rl.line === (this.initialValue || '');
 
-      if (key?.name === 'escape' || (key?.name === 'left' && !this.rl.line)) {
+      if (key?.name === 'escape' || (key?.name === 'left' && untouched)) {
         this.answer = null;
         this.answerName = '← Back'; // render() falls back to raw this.answer ("null") otherwise
         this.status = 'answered';

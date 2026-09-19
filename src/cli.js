@@ -498,17 +498,24 @@ async function searchTitles(client, typeFilter = null) {
 }
 
 async function showWatchlistSection(client, type) {
+  // Watchlist items are freshly parsed from disk each pass, so they're new
+  // object references every time even for the same entry — inquirer's
+  // value-based `default` (strict ===) can't match those directly. Track
+  // the id instead and resolve it to whatever index it's at now.
+  let lastPickId = null;
   for (;;) {
     const list = (await getWatchlist()).filter((i) => i.type === type); // re-read each pass so a removal is reflected immediately
     if (!list.length) return; // everything here got removed — back out to the Movies/Series chooser
 
     const sortedList = [...list].sort((a, b) => cleanTitle(a.name).localeCompare(cleanTitle(b.name)));
+    const defaultIndex = lastPickId != null ? sortedList.findIndex((i) => i.id === lastPickId) : -1;
     const { pick } = await inquirer.prompt([
       {
         type: 'list',
         name: 'pick',
         message: `Watchlist — ${type === 'movie' ? 'Movies' : 'Series'} (${list.length})`,
         pageSize: 20,
+        default: defaultIndex >= 0 ? defaultIndex : undefined,
         choices: [
           ...sortedList.map((i) => ({ name: cleanTitle(i.name), value: i })),
           new inquirer.Separator(),
@@ -517,6 +524,7 @@ async function showWatchlistSection(client, type) {
       },
     ]);
     if (!pick) return;
+    lastPickId = pick.id;
 
     await handleMatch(client, pick, { inWatchlist: true });
     // loop back to this section's list
@@ -525,12 +533,14 @@ async function showWatchlistSection(client, type) {
 
 /** Bare Movies/Series chooser in front of the same searchTitles() calls the old top-level Movies/Series items used directly. */
 async function showBrowse(client) {
+  let lastSection;
   for (;;) {
     const { section } = await inquirer.prompt([
       {
         type: 'list',
         name: 'section',
         message: 'Browse',
+        default: lastSection,
         choices: [
           { name: 'Movies', value: 'movie' },
           { name: 'Series', value: 'series' },
@@ -540,6 +550,7 @@ async function showBrowse(client) {
       },
     ]);
     if (!section) return;
+    lastSection = section;
 
     await searchTitles(client, section);
     // loop back to the Movies/Series chooser
@@ -547,6 +558,7 @@ async function showBrowse(client) {
 }
 
 async function showLocalWatchlist(client) {
+  let lastSection;
   for (;;) {
     const list = await getWatchlist();
     if (!list.length) {
@@ -562,6 +574,7 @@ async function showLocalWatchlist(client) {
         type: 'list',
         name: 'section',
         message: `Watchlist (${list.length})`,
+        default: lastSection,
         choices: [
           { name: `Movies (${movieCount})`, value: 'movie', disabled: movieCount === 0 ? 'empty' : false },
           { name: `Series (${seriesCount})`, value: 'series', disabled: seriesCount === 0 ? 'empty' : false },
@@ -571,6 +584,7 @@ async function showLocalWatchlist(client) {
       },
     ]);
     if (!section) return;
+    lastSection = section;
 
     await showWatchlistSection(client, section);
     // loop back to the Movies/Series chooser
@@ -599,12 +613,14 @@ async function buildFullSearchIndex(client) {
 
 /** Single-action for now — a home for maintenance/admin actions as they show up, rather than cluttering the top-level menu. */
 async function showSettings(client) {
+  let lastAction;
   for (;;) {
     const { action } = await inquirer.prompt([
       {
         type: 'list',
         name: 'action',
         message: 'Settings',
+        default: lastAction,
         choices: [
           { name: '(Re)build full search index — update catalog (slow)', value: 'index' },
           new inquirer.Separator(),
@@ -613,6 +629,7 @@ async function showSettings(client) {
       },
     ]);
     if (!action) return;
+    lastAction = action;
 
     await buildFullSearchIndex(client);
     // loop back to Settings
@@ -626,12 +643,14 @@ export async function runMenu(client) {
   // down. Require it twice in a row (with nothing else pressed between)
   // before actually quitting.
   let armedToQuit = false;
+  let lastSection;
   while (!exit) {
     const { section } = await inquirer.prompt([
       {
         type: 'list',
         name: 'section',
         message: 'Xtream VOD Player',
+        default: lastSection,
         choices: [
           { name: 'Watchlist', value: 'watchlist' },
           { name: 'Search', value: 'search' },
@@ -650,6 +669,7 @@ export async function runMenu(client) {
       continue;
     }
     armedToQuit = false;
+    lastSection = section;
 
     try {
       if (section === 'watchlist') await showLocalWatchlist(client);
